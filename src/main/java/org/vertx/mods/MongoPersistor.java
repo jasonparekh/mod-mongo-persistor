@@ -16,21 +16,23 @@
 
 package org.vertx.mods;
 
-import com.mongodb.DB;
-import com.mongodb.DBCollection;
-import com.mongodb.DBCursor;
-import com.mongodb.DBObject;
-import com.mongodb.Mongo;
-import com.mongodb.WriteResult;
-import com.mongodb.util.JSON;
+import java.net.UnknownHostException;
+import java.util.UUID;
+
 import org.vertx.java.busmods.BusModBase;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.Message;
 import org.vertx.java.core.json.JsonArray;
 import org.vertx.java.core.json.JsonObject;
 
-import java.net.UnknownHostException;
-import java.util.UUID;
+import com.mongodb.DB;
+import com.mongodb.DBCollection;
+import com.mongodb.DBCursor;
+import com.mongodb.DBObject;
+import com.mongodb.Mongo;
+import com.mongodb.MongoException;
+import com.mongodb.WriteResult;
+import com.mongodb.util.JSON;
 
 /**
  * MongoDB Persistor Bus Module<p>
@@ -51,6 +53,7 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
   private Mongo mongo;
   private DB db;
 
+  @Override
   public void start() {
     super.start();
 
@@ -73,10 +76,12 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
     }
   }
 
+  @Override
   public void stop() {
     mongo.close();
   }
 
+  @Override
   public void handle(Message<JsonObject> message) {
 
     String action = message.body.getString("action");
@@ -88,7 +93,10 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
 
     switch (action) {
       case "save":
-        doSave(message);
+        doSaveOrInsert(true, message);
+        break;
+      case "insert":
+        doSaveOrInsert(false, message);
         break;
       case "find":
         doFind(message);
@@ -99,13 +107,16 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
       case "delete":
         doDelete(message);
         break;
+      case "drop":
+        doDrop(message);
+        break;
       default:
         sendError(message, "Invalid action: " + action);
         return;
     }
   }
 
-  private void doSave(Message<JsonObject> message) {
+  private void doSaveOrInsert(boolean save, Message<JsonObject> message) {
     String collection = getMandatoryString("collection", message);
     if (collection == null) {
       return;
@@ -123,7 +134,7 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
     }
     DBCollection coll = db.getCollection(collection);
     DBObject obj = jsonToDBObject(doc);
-    WriteResult res = coll.save(obj);
+    WriteResult res = save ? coll.save(obj) : coll.insert(obj);
     if (res.getError() == null) {
       if (genID != null) {
         JsonObject reply = new JsonObject();
@@ -181,6 +192,7 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
 
       // Set a timeout, if the user doesn't reply within 10 secs, close the cursor
       final long timerID = vertx.setTimer(10000, new Handler<Long>() {
+        @Override
         public void handle(Long timerID) {
           container.getLogger().warn("Closing DB cursor on timeout");
           try {
@@ -191,6 +203,7 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
       });
 
       message.reply(reply, new Handler<Message<JsonObject>>() {
+        @Override
         public void handle(Message<JsonObject> msg) {
           vertx.cancelTimer(timerID);
           // Get the next batch
@@ -215,6 +228,7 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
   protected void sendMoreExist(String status, Message<JsonObject> message, JsonObject json) {
     json.putString("status", status);
     message.reply(json, new Handler<Message<JsonObject>>() {
+      @Override
       public void handle(Message<JsonObject> msg) {
 
       }
@@ -258,6 +272,21 @@ public class MongoPersistor extends BusModBase implements Handler<Message<JsonOb
     int deleted = res.getN();
     JsonObject reply = new JsonObject().putNumber("number", deleted);
     sendOK(message, reply);
+  }
+
+  private void doDrop(Message<JsonObject> message) {
+    try {
+      String dbName = getMandatoryString("db", message);
+      if (dbName == null) {
+        return;
+      }
+      DB dbToDrop = mongo.getDB(dbName);
+      dbToDrop.dropDatabase();
+      sendOK(message);
+    } catch (MongoException e) {
+      logger.error("Failed to drop database", e);
+      sendError(message, "Error dropping database");
+    }
   }
 
   private DBObject jsonToDBObject(JsonObject object) {
